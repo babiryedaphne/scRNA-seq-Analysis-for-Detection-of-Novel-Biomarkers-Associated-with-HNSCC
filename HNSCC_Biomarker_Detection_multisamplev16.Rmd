@@ -1,0 +1,1129 @@
+---
+title: "Detection of Novel Bio-markers Associated with Head and Neck Cancer in Myeloid
+  Cells"
+author: "Daphne Babirye"
+date: "2023-08-08"
+output:
+  word_document: default
+  html_document: default
+Source: "Orchestrating Single-Cell Analysis with Bioconductor (http://bioconductor.org/books/3.17/OSCA.basic/)"
+---
+
+```{r setup, echo=FALSE,include=FALSE}
+
+library(reticulate)
+
+library(Seurat)
+
+library(Matrix)
+
+library(SingleCellExperiment)
+
+library("rstudioapi")
+
+#stringr package installed
+#if (!require(stringr)) {
+  #install.packages("stringr")
+#}
+library(stringr)
+
+#load the library
+if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+BiocManager::install()
+
+BiocManager::install('Rtools')
+
+#install the R.utils package
+#install.packages("R.utils", repos = "https://cloud.r-project.org")
+#install.packages("R.utils")
+library(R.utils)
+
+#Install DropletUtils package
+#if (!require('DropletUtils', quietly = TRUE))
+ #   install.packages('DropletUtils')
+library(DropletUtils)
+
+#install scater and scuttle package
+#BiocManager::install("scater")
+#BiocManager::install("scuttle")
+library(scuttle)
+
+#install.packages('tidyverse')
+#if (!require('tidyverse', quietly = TRUE))
+ #   install.packages('tidyverse')
+library(tidyverse)
+
+library(knitr)
+
+
+# Loading the robustbase library
+library(robustbase)
+
+# Load the 'scater' library 
+library(scater)  
+
+#import required package
+#BiocManager::install('scran')
+library(scran)
+
+#install corral package for dimensional reduction
+#BiocManager::install("corral")
+library(corral)
+
+#Clustering libraries
+
+library(bluster)
+
+library(igraph)
+
+library(pathfindR.data)
+
+library(AUCell)
+
+#if (!require('pheatmap', quietly = TRUE))
+#    install.packages('pheatmap')
+library(pheatmap)
+
+#Library to arrange plots
+library(gridExtra)
+
+## Load the human gene annotation package
+library(org.Hs.eg.db)
+
+# Load the limma package, which provides methods for differential expression analysis
+library(limma)
+
+library(BiocNeighbors)
+
+library(batchelor)
+
+#cell type annotation
+library(celldex)
+
+library(SingleR)
+
+# DE between conditions
+#BiocManager::install('edgeR')
+library(edgeR)
+
+
+```
+
+##### 1.0 Loading Data
+
+**1.1 Extract the Samples**
+
+````{r}
+#Get the working directory
+getwd()
+
+#The working directory id the myeinfobank folder
+
+#get all file names in folder
+filenames<-list.files("Data/GSE139324_RAW") 
+
+
+#get the GSM numbers
+gsm_numbers <- gsub("_(?!.*_).*", "", filenames, perl=TRUE)
+
+# print unique GSM numbers
+GSMs <- unique(gsm_numbers)
+GSMs <-GSMs[-1]
+
+#Select a few GSMs
+#myGSMs<- GSMs[45:57]
+myGSMs<- GSMs
+myGSMs
+
+````
+
+**1.2.Create the sce objects for the samples **
+
+````{r}
+
+# Define the directory
+tempDir <- "temp_10x"
+
+# Create the directory if it doesn't exist
+if (!dir.exists(tempDir)) {
+  dir.create(tempDir)
+}
+
+# Loop through GSMs
+for (i in 1:length(myGSMs)) {
+   
+   # Select the filenames that contain the current GSM number (myGSMs[i]) and store them in names
+   names <- filenames[grep(myGSMs[i], filenames)]
+   
+   # Copy each file to the directory and rename it
+   file.copy(from = paste("Data/GSE139324_RAW/", names[1], sep=""), 
+             to = paste(tempDir, "/barcodes.tsv.gz", sep=""))
+   file.copy(from = paste("Data/GSE139324_RAW/", names[2], sep=""), 
+             to = paste(tempDir, "/genes.tsv.gz", sep=""))
+   file.copy(from = paste("Data/GSE139324_RAW/", names[3], sep=""), 
+             to = paste(tempDir, "/matrix.mtx.gz", sep=""))
+   
+   # Use the directory in the read10xCounts function
+   sce <- read10xCounts(tempDir, col.names=TRUE, sample.names = myGSMs[i])
+   
+   # Create a new variable with the name "sce" followed by the current GSM number
+   assign(paste("sce", myGSMs[i], sep=""), sce)
+   
+   # Remove the files from the directory for the next operation
+   unlink(paste(tempDir, "/barcodes.tsv.gz", sep=""))
+   unlink(paste(tempDir, "/genes.tsv.gz", sep=""))
+   unlink(paste(tempDir, "/matrix.mtx.gz", sep=""))
+}
+
+# save one Rdata for all sce objects
+save(list=ls()[grep("sceGSM",ls())],file="Data/sceGSMs.RData")
+
+# Load the save R.data object
+#load('Data/sceGSMs.RData')
+````
+
+**1.3. Merge the sce objects into one **
+
+````{r}
+
+#Merge the sce objects 
+
+#create a list of all sce objects
+sce.list <- lapply(ls(pattern = "sceGSM"), get)
+
+#Create one sce object by merging all the samples 
+
+#combine sce objects by column
+sce.all <- do.call(cbind, sce.list)
+sce.all
+
+
+
+````
+Assigning Conditions of the cells (healthy or diseased) to ColData
+````{r}
+# Determine the condition based on 'Sample' column values
+sce.all$condition <- ifelse(grepl("HNSCC", colData(sce.all)$Sample), "HNSCC",
+                           ifelse(grepl("HD", colData(sce.all)$Sample), "HD", NA))
+
+
+#Healthy cells
+## Count the number of 'HD' conditions in colData
+hd_count <- sum(colData(sce.all)$condition == 'HD')
+
+# Print the count
+cat("Number of cells with the 'HD' condition:", hd_count, "\n")
+
+#HNSCC cells
+
+## Count the number of 'HD' conditions in colData
+HNSCC_count <- sum(colData(sce.all)$condition == 'HNSCC')
+
+# Print the count
+cat("Number of cells with the 'HNSCC' condition:", HNSCC_count, "\n")
+
+
+````
+
+##### 2.0. Exploratory Data Analysis
+
+Explore the sce object
+````{r}
+# Check the dimensions and structure of the count matrix
+print(dim(counts(sce.all)))
+str(counts(sce.all))
+
+#checking gene name format
+# Fetch gene names
+gene_names <- rownames(sce.all)
+
+# Look at the first few gene names
+head(gene_names)
+
+#Source: https://statomics.github.io/SGA/sequencing_singleCell.html
+
+
+# Display the first 6 rows and 6 columns of the gene expression counts in sce.pbmc
+sce.all %>% 
+  counts %>% 
+  head(n = c(6, 6))
+
+# Check the class of the gene expression counts in sce.pbmc
+sce.all %>% 
+  counts %>% 
+  class
+
+# Retrieve the available assays in the sce.pbmc object
+sce.all %>% 
+  assays
+
+# Display the first few rows of the row metadata in sce.pbmc
+sce.all %>% 
+  rowData %>% 
+  head
+
+# Display the first few rows of the column metadata in sce.pbmc
+sce.all %>% 
+  colData %>% 
+  head
+
+# Ensure the row names (which correspond to gene names) in the SingleCellExperiment (sce.pbmc) object are unique.
+rownames(sce.all) <- uniquifyFeatureNames(rowData(sce.all)$ID, rowData(sce.all)$Symbol)
+
+#store the unfiltered sce object in another variable
+unfiltered <- sce.all
+
+````
+
+##### 3.0. Identifying Low Quality Cells
+
+**3.1 Computing QC Metrics**
+````{r}
+
+# Identifying the location of genes
+head(rownames(sce.all))
+
+is.mito<-grep("MT-",rownames(sce.all))
+
+summary(is.mito)
+
+
+#compute the per-cell QC statistics of the SingleCellExperiment object
+qc_metrics <- perCellQCMetrics(sce.all, subsets=list(Mito=is.mito))
+
+
+# Summary statistics for qc metrics
+
+# total sum of counts across all relevant features for each cell
+summary(qc_metrics$sum)
+
+#expressed features/genes in each cell
+summary(qc_metrics$detected)
+
+#proportion of reads mapped to genes in the mitochondrial genome
+summary(qc_metrics$subsets_Mito_percent)
+
+#percentage of reads mapped to ERCC transcripts
+summary(qc_metrics$altexps_ERCC_percent)
+# no reads mapped to ERCC transcripts
+````
+
+**3.2 Identifying Low Quality Cells**
+
+Adaptive Thresholds #identify cells that are outliers for each QC metrics, according to each cells' median absolute deviation (MAD) from the median value 
+
+````{r}
+# Calculating per-cell QC filters for specific sub-fields of the dataframe
+
+# Specifying the sub-fields of interest for per-cell QC filtering
+sub.fields <- c("subsets_Mito_percent")
+
+#Compute outliers for each sample separately
+
+batch.reasons <- perCellQCFilters(qc_metrics, batch=sce.all$Sample,
+                                  sub.fields=sub.fields)
+colSums(as.matrix(batch.reasons))
+
+# extracting the exact filter thresholds to check whether the selected thresholds are appropriate
+#low_lib_size
+
+print('low lib_size Thresholds')
+attr(batch.reasons$low_lib_size, "thresholds")
+
+#low_n_features
+print('Low n_features Thresholds')
+attr(batch.reasons$low_n_features, "thresholds")
+
+
+#Source: http://bioconductor.org/books/3.17/OSCA.advanced/quality-control-redux.html#qc-batch
+````
+
+**3.3 Checking diagnostic plots**
+Inspect the distributions of QC metrics to identify possible problems
+
+````{r}
+
+# Attach QC metrics to the metadata of 'sce.all' dataset
+colData(sce.all) <- cbind(colData(sce.all), qc_metrics)  
+
+# Create 'discard' variable and assign 'batch.reasons$discard' values
+sce.all$discard <- batch.reasons$discard  
+colData(sce.all)
+````
+
+plot QC metrics for first 8 samples
+````{r out.width='100%', out.height='100%'}
+# identify unique samples
+unique_samples <- unique(colData(sce.all)$Sample)
+
+# Get the cells that belong to the first 10 samples
+cells_for_first_10_samples <- which(colData(sce.all)$Sample %in% unique_samples[1:8])
+
+# Subset the sce.all object
+sce.subset <- sce.all[, cells_for_first_10_samples]
+
+
+# Generate a grid arrangement of diagnostic plots but only for the first 10 samples
+
+plotColData(sce.subset, x='Sample', y="sum", colour_by="discard") +  # Plot total count of gene expression, colored by 'discard'
+    scale_y_log10() + ggtitle("Total count")+  # Apply log10 scale to y-axis and set plot title
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  
+plotColData(sce.subset, x='Sample', y="detected", colour_by="discard") +  # Plot number of detected features, colored by 'discard'
+    scale_y_log10() + ggtitle("Detected features")+  # Apply log10 scale to y-axis and set plot title
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  
+plotColData(sce.subset, x='Sample', y="subsets_Mito_percent",  # Plot percentage of mitochondrial genes, colored by 'discard'
+              colour_by="discard") + ggtitle("Mito percent")+  # Set plot title
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+   # ncol=1  # Arrange the plots in one column
+
+
+
+````
+
+Generate a diagnostic plot showing the relationship between total count and percentage of mitochondrial genes
+````{r}
+plotColData(sce.all, x="sum", y="subsets_Mito_percent",
+            colour_by="discard") + scale_x_log10()  # Apply log10 scale to x-axis
+````
+No points in the top-right corner that might characterise to metabolically active undamaged cells.
+
+**3.4 Removing outliers**
+````{r}
+# Remove low quality cells and Keep the columns with good cells.
+sce.all <- sce.all[,!batch.reasons$discard]
+
+sce.all
+````
+
+##### 4.0. Normalisation
+
+Using Scaling and log transformation
+
+````{r}
+
+# Set random number seed for reproducibility
+set.seed(100)
+
+# Perform quick clustering of cells
+clust.sce.all <- scran::quickCluster(sce.all)
+unique(clust.sce.all)
+
+# Compute size factors for normalization
+sce.all <- scran::computeSumFactors(sce.all, cluster=clust.sce.all, min.mean=0.1)
+
+# Perform logarithmic transformation of counts
+sce.all <- logNormCounts(sce.all)
+
+# Retrieve assay names
+assayNames(sce.all)
+
+#generates a summary of the size factors calculated for each cell
+summary(sizeFactors(sce.all))
+````
+
+Generate a scatter plot to visualize the relationship between library size factors and deconvolution factors
+````{r}
+
+#Relationship between the library size factors and the deconvolution size factors 
+plot(librarySizeFactors(sce.all), sizeFactors(sce.all), pch=16, xlab="Library size factors", 
+     ylab="Deconvolution factors", log="xy")
+
+#add abline
+abline(a=0, b=1, col="blue")
+````
+
+##### 5.0. Feature Selection
+
+**5.1.Quantifying Technical Noise/Variance Modeling**
+
+Create a trend by making some distributional assumptions about the noise.It is assumed that the noise has a near-Poisson variation as seen in UMI counts when only technical noise from library preparation and sequencing is considered.
+
+````{r}
+#set seed for reproducibility
+set.seed(100)
+
+# Model the gene-specific variance for each cell in the dataset using a Poisson distribution
+dec.sce.all <- modelGeneVarByPoisson(sce.all, block = sce.all$Sample)
+
+#Display the first rows of the gene-specific variance, sorted by the 'bio' column in descending order
+head(dec.sce.all[order(dec.sce.all$bio, decreasing=TRUE),])
+````
+
+Plot the variance of normalized log-expression values for each gene in the dataset, against the mean log-expression The blue line is a representation of the mean-variance relationship of the Poisson noise
+````{r}
+
+# Per Sample Plots of Variance for 8 samples
+par(mfrow=c(2,4))   
+
+blocked.stats <- dec.sce.all$per.block
+
+# Only take the first 8 columns for plotting
+sample_columns <- colnames(blocked.stats)[1:8]
+
+for (i in sample_columns) {
+  current <- blocked.stats[[i]]
+  plot(current$mean, current$total, main=i, pch=16, cex=0.5,
+       xlab="Mean of log-expression", ylab="Variance of log-expression")
+  curfit <- metadata(current)
+  points(curfit$mean, curfit$var, col="red", pch=16)
+  curve(curfit$trend(x), col='dodgerblue', add=TRUE, lwd=2)
+}
+
+
+````
+
+**5.2.Selecting Highly variable genes**
+
+````{r}
+#Selecting the top 10% highly variable genes
+chosen <- getTopHVGs(dec.sce.all, prop=0.1)
+
+# Displaying the structure of the chosen Highly Variable Genes (HVGs)
+str(chosen)
+
+````
+
+##### 6.0  Batch correction & Dimensional Reduction & 7.0 Dimensional Reduction
+
+Remove the effects of batches/ different samples and undertakes PA
+
+````{r}
+set.seed(100)
+
+sce.corrected <- correctExperiments(sce.all,
+                                    batch = sce.all$Sample,
+                                    restrict = NULL,
+                                    subset.row = chosen,
+                                    correct.all = TRUE,
+                                    assay.type = "logcounts",
+                                    PARAM = FastMnnParam(),
+                                    combine.assays = NULL,
+                                    combine.coldata = NULL,
+                                    include.rowdata = TRUE,
+                                    add.single = TRUE
+                                    )
+
+#assign the new object back to sce.all
+sce.all <- sce.corrected
+
+sce.all
+
+#Source: R documentation
+````
+
+UMAP was chosen because UMAP aims to preserve more global structure although this reduces resolution within each visual cluster. UMAP is also much faster than t-SNE
+````{r}
+# Set the random number seed to ensure reproducibility
+set.seed(100)
+
+# Run UMAP (Uniform Manifold Approximation and Projection) on the data 'sce.all' 
+# using the 'MNN' (Mutual Nearest Neighbors) dimensionality reduction.
+# The 'external_neighbors' parameter set to TRUE allows the function to detect neighbors 
+# external to the UMAP space, thus improving the UMAP visualization.
+# 'AnnoyParam()' is used as a parameter to speed up the neighbor searching process.
+sce.all <- runUMAP(sce.all, dimred="corrected",
+    external_neighbors=TRUE, 
+    BNPARAM=AnnoyParam())
+
+````
+
+
+##### 8.0.Clustering
+
+````{r}
+# Set the random number seed to ensure reproducibility
+set.seed(100)
+
+# Assign cluster labels to the cells in 'sce.all' based on their coordinates in the "MNN" reduced dimension space.
+# This is achieved through a two-step clustering process.
+# First step is k-means clustering with 1000 centers, followed by the construction of a k-nearest neighbors graph with 10 neighbors.
+colLabels(sce.all) <- clusterRows(reducedDim(sce.all, "corrected"),
+    TwoStepParam(KmeansParam(centers=1000), NNGraphParam(k=10)))
+
+# Display the count of cells assigned to each cluster
+table(colLabels(sce.all))
+
+# Construct a contingency table of cluster labels against sample batches
+tab <- table(Cluster=colLabels(sce.all), batch = sce.all$Sample)
+
+# Load the 'pheatmap' library for plotting
+library(pheatmap)
+
+# Generate a heatmap using the contingency table. Log transformation is applied to scale the color gradient and ensure clarity in visualization.
+# The '+10' in log transformation is to avoid log(0) and adjust the color scale. 'viridis' color palette is used for the heatmap.
+pheatmap(log10(tab+10), color=viridis::viridis(100))
+
+#Comparing these clusters to the batch labels using a heat map checks for any remaining batch effects post correction.
+
+````
+
+Visualise the clusters
+````{r}
+
+# Plot the cells in a UMAP (Uniform Manifold Approximation and Projection) plot, with cells colored by their assigned cluster
+# and the cluster number displayed on the plot. This visualization helps to see how cells of different clusters are related spatially.
+
+# add scrambling option in scater's plotting functions.
+scrambled <- sample(ncol(sce.all))
+
+plotUMAP(sce.all, colour_by="label", text_by="label")
+plotUMAP(sce.all[,scrambled], colour_by="Sample")
+
+#plots of clusters for each sample of the dataset.
+#Each point represents a cell that is colored by  batch. 
+#table(Cluster=colLabels(sce.all), Donor=sce.all$batch)
+
+
+````
+
+
+##### 9.0 Marker Gene Detection
+
+````{r}
+set.seed(100)
+marker.info <- findMarkers(sce.all, block = sce.all$Sample, direction = 'up', lfc = 1)
+marker.info
+
+````
+
+**Top Marker genes for each cluster**
+````{r}
+
+#Create a function to detect the marker genes for each cluster
+selectMarkerGenes <- function(marker.info) {
+  # Initialize an empty list to store the marker genes for each cluster
+  markersList <- list()
+  
+  # Loop through each cluster
+  for(i in seq_along(marker.info)) {
+    # Select the marker info for the current cluster
+    cluster.markers <- marker.info[[i]]
+    
+    chosen.top.markers <- head(cluster.markers[cluster.markers$Top <= 10,],15)
+  
+    chosen.top.markers <- chosen.top.markers[,1:4]
+    
+    lfcs <- getMarkerEffects(chosen.top.markers)
+    
+    
+    # Add the top marker genes to the list
+    markersList[[paste0("markers_", i)]] <- chosen.top.markers
+    
+  }
+  
+  return(markersList)
+}
+
+# Run fuction to detect marker genes
+markerGenes <- selectMarkerGenes(marker.info)
+markerGenes
+
+
+````
+
+
+##### 10.0 Cell type annotation
+
+````{r}
+set.seed(100)
+
+# Initialize an empty list to store the plots
+plotList2 <- list()
+
+curated_markers = c('CD1C','C1QA','CD68','TREM2','FCER1A','CLEC10A', 'CMTM5', 'ITGA2B', 'PF4', 'HBM', 'HBQ1', 'GYPA', 'S100A9', 'LYZ', 'MPO', 'SERPINB1')
+
+# Loop through each cluster
+for(i in seq_along(curated_markers)) {
+  # Generate the plot for the current cluster
+  p <- plotExpression(sce.all, features=curated_markers[i], 
+                      x="label", colour_by="label") +
+    ggtitle(paste0("Marker ", curated_markers[i]))
+  
+  # Add the plot to the list
+  plotList2[[i]] <- p
+}
+
+plotList2
+
+#library(gridExtra)
+#x11()
+
+# Arrange the plots in a grid
+#grid.arrange(grobs = plotList2, nrow = 8, ncol = 2)
+````
+
+plot heatmap to identify clusters with myeloid cells(curated markers)
+
+Clusters 4,5 and 9 have high expression of monocytesLYZ and S100A9. But a deeper look at the type of monocytes suggests that these clusters are macrophages with high expression of CD68 and C1QA.
+````{r}
+
+#Remove repreated column names by making the colnames a sequence of numbers
+colnames(sce.all) <- as.character(seq(1, 126630))
+
+# Compute mean expression per cluster
+avg_data <- aggregateAcrossCells(sce.all, ids = sce.all$label, statistics = "mean",use.assay.type = "counts")
+
+# Now plot the heatmap
+plotHeatmap(avg_data, features=curated_markers,exprs_values = "counts", order_columns_by="label",
+            colour_columns_by="label",
+            center=TRUE, symmetric=TRUE, zlim=c(-5, 5))
+
+
+#R documentation (scuttle package)
+
+````
+
+
+Cell Type Classification using a Reference dataset
+````{r}
+set.seed(100)
+
+# Aggregate the count data across cells for each identified cluster label in the 'sce.all' object
+sce.aggregated <- sumCountsAcrossCells(sce.all, id=colLabels(sce.all))
+
+# Load the Human Primary Cell Atlas data, which will be used as a reference dataset for cell type annotation
+hpc <- HumanPrimaryCellAtlasData()
+
+# Perform cell type annotation using the 'SingleR' function
+anno.sce <- SingleR(sce.aggregated, ref = hpc, labels = hpc$label.main,
+    assay.type.test="sum")
+
+anno.sce
+
+
+#writexl::write_xlsX(data.frame(anno.sce), 'anno.sce.xlsx', rownames = TRUE)
+
+````
+##### 11. Deferrencial Expression Between Conditions
+
+**11.1 DE Between HNSCC and Healthy Donor Cells**
+
+Subset Data to retain only the myeloid cell clusters for DE analysis
+````{r}
+# Filter cells based on myeloid cells labels/clusters
+sce.myeloid <- sce.all[, sce.all$label %in% c(4, 5, 9)]
+
+#confirm labels in subset dataset
+unique(sce.myeloid$label)
+
+sce.myeloid
+
+````
+
+
+**11.1. Creating pseudo-bulk samples**
+
+````{r}
+
+# Create Using 'label' and 'sample' as our two factors; each column of the output
+# corresponds to one unique combination of these two factors.
+sce.summed <- aggregateAcrossCells(sce.myeloid, 
+    id=colData(sce.myeloid)[,c("label", "Sample")])
+sce.summed
+
+
+# Removing all pseudo-bulk samples with 'insufficient' cells.
+sce.summed <- sce.summed[,sce.summed$ncells >= 10]
+
+
+````
+
+
+**11.2 DE analysis for each of the labels**
+
+Identify HNCC induced DE in each cell type (Monocytes)
+````{r}
+de.results <- pseudoBulkDGE(sce.summed, 
+    label=sce.summed$label,
+    design=~condition,
+    coef="conditionHNSCC",
+    condition=sce.summed$condition
+)
+
+de.results
+
+````
+
+**DE results for each label/Cluster**
+
+Genes with positive log Fold Change (logFC) values are upregulated in the Head and Neck cancer (HNSCC) condition compared to the reference condition (HD), while genes with negative logFC values are downregulated.
+
+The P-Value and False Discovery Rate (FDR) columns help gauge the statistical significance of these observations. Genes with low P-Value and FDR values are considered as strong candidates for being genuinely differentially expressed due to HNSCC.
+
+
+Cluster 4 (Monocytes) Results
+
+````{r}
+
+cur.results4 <- de.results[['4']]
+
+
+# Filter out rows with NA values in the relevant columns
+non_na_genes <- cur.results4[!is.na(cur.results4$PValue) & 
+                             !is.na(cur.results4$FDR) & 
+                             !is.na(cur.results4$logFC), ]
+
+# Filter genes based on the given criteria
+filtered_genes <- non_na_genes[(non_na_genes$PValue < 0.05) & 
+                               (non_na_genes$FDR < 0.35) & 
+                               (abs(non_na_genes$logFC) > 1), ]
+
+# Order the filtered genes by FDR and select the top 10 Genes
+top_genes4 <- head(filtered_genes[order(filtered_genes$FDR), ], 10)
+top_genes4<-data.frame(top_genes4)
+top_genes4
+
+````
+
+Visualisation
+````{r}
+# Create a new variable indicating which genes to label
+cur.results4$label_genes <- with(cur.results4, ifelse(FDR < 0.35 & abs(logFC) > 1 & PValue < 0.05, rownames(cur.results4), NA))  # Assuming "GeneName" is the column with gene names
+
+# Creating the volcano plot
+volcano_plot <- ggplot(data.frame(cur.results4), aes(x = logFC, y = -log10(PValue))) + 
+  geom_point(aes(color = (FDR < 0.35 & abs(logFC) > 1&cur.results4$PValue < 0.05
+)), size = 2) + # Adjust color condition for points based on significance and fold change threshold.
+  scale_color_manual(values = c("TRUE" = "red", "FALSE" = "grey")) +
+  labs(title = "Volcano Plot for Cluster 4 Monocytes DEGs",
+       x = "Log2 Fold Change",
+       y = "-Log10 PValue",
+       color = "Significant") +
+  theme_minimal() +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "blue") + # p-value threshold line
+  geom_vline(xintercept = 1, linetype = "dashed", color = "blue") +
+  geom_vline(xintercept = -1, linetype = "dashed", color = "blue")+
+  geom_text(aes(label = label_genes), vjust = 1.5, hjust = 0.5, size = 3, check_overlap = TRUE)# Adding gene names
+
+# Display the plot
+print(volcano_plot)
+
+#Source: https://biostatsquid.com/volcano-plots-r-tutorial/
+````
+
+
+Diagnostic plots to check for potential problems in the analysis
+
+Model the mean-variance trend 
+````{r}
+
+#Diagnostic plots
+
+cluster4_plot <- metadata(cur.results4)$y
+plotBCV(cluster4_plot,main = ' Gene BCV as a function of the Cluster 4 average abundance Analysis')
+
+````
+
+**Cluster 5 (Monocytes) Results**
+````{r}
+cur.results5 <- de.results[['5']]
+
+# select the top genes based on PValue FDR and LogFC
+
+# Filter out rows with NA values in the relevant columns
+non_na_genes5 <- cur.results5[!is.na(cur.results5$PValue) & 
+                             !is.na(cur.results5$FDR) & 
+                             !is.na(cur.results5$logFC), ]
+
+# Filter genes based on the given criteria
+filtered_genes5 <- non_na_genes5[(non_na_genes5$PValue < 0.05) & 
+                               (non_na_genes5$FDR < 0.1) & 
+                               (abs(non_na_genes5$logFC) > 1), ]
+
+# Order the filtered genes by PValue and select the top 25
+top_genes5 <- head(filtered_genes5[order(filtered_genes5$FDR), ], 10)
+top_gene5<-data.frame(top_genes5)
+data.frame(top_genes5)
+
+````
+
+Visualisation
+````{r}
+
+# Create a new variable indicating which genes to label
+cur.results5$label_genes <- with(cur.results5, ifelse(FDR < 0.1 & abs(logFC) > 1 & PValue < 0.05, rownames(cur.results5), NA))  # Assuming "GeneName" is the column with gene names
+
+# Creating the volcano plot
+volcano_plot <- ggplot(data.frame(cur.results5), aes(x = logFC, y = -log10(PValue))) + 
+  geom_point(aes(color = (FDR < 0.1 & abs(logFC) > 1)), 
+             size = 2) + # Adjust color condition for points based on significance and fold change threshold.
+  scale_color_manual(values = c("TRUE" = "red", "FALSE" = "grey")) +
+  labs(title = "Volcano Plot for Cluster 5 Monocytes DEGs",
+       x = "Log2 Fold Change",
+       y = "-Log10 PValue",
+       color = "Significant") +
+  theme_minimal() +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "blue") + # p-value threshold line
+  geom_vline(xintercept = 1, linetype = "dashed", color = "blue") +
+  geom_vline(xintercept = -1, linetype = "dashed", color = "blue")+
+  geom_text(aes(label = label_genes), vjust = 1.5, hjust = 0.5, size = 3, check_overlap = TRUE)# Adding gene names
+
+
+# Display the plot
+print(volcano_plot)
+
+#source: https://biostatsquid.com/volcano-plots-r-tutorial/
+````
+
+
+
+Diagnostic plots to check for potential problems in the analysis
+
+Model the mean-variance trend 
+````{r}
+
+#Diagnostic plots
+
+cluster5_plot <- metadata(cur.results5)$y
+plotBCV(cluster5_plot,main = ' Gene BCV as a function of the Cluster 5 average abundance Analysis')
+
+
+````
+
+
+
+
+**Cluster 9 (Monocytes) Results**
+
+````{r}
+
+cur.results9 <- de.results[['9']]
+#Present results in table
+
+# select the top genes based on PValue FDR and LogFC
+
+# Filter out rows with NA values in the relevant columns
+non_na_genes9 <- cur.results9[!is.na(cur.results9$PValue) & 
+                             !is.na(cur.results9$FDR) & 
+                             !is.na(cur.results9$logFC), ]
+
+
+# Filter genes based on the given criteria
+filtered_genes9 <- non_na_genes9[(non_na_genes9$PValue < 0.05) & 
+                               (non_na_genes9$FDR < 0.6) & 
+                               (abs(non_na_genes9$logFC) > 1), ]
+
+# Order the filtered genes by PValue and select the top 25
+top_genes9 <- head(filtered_genes9[order(filtered_genes9$FDR), ], 10)
+data.frame(top_genes9)
+
+
+````
+Visualisation of Selected Genes
+
+````{r}
+# Create a new variable indicating which genes to label
+cur.results9$label_genes <- with(cur.results9, ifelse(FDR < 0.6 & abs(logFC) > 1 & PValue < 0.05, rownames(cur.results9), NA))  # Assuming "GeneName" is the column with gene names
+
+# Creating the volcano plot
+volcano_plot <- ggplot(data.frame(cur.results9), aes(x = logFC, y = -log10(PValue))) + 
+  geom_point(aes(color = (FDR < 0.6 & abs(logFC) > 1)), 
+             size = 2) + # Adjust color condition for points based on significance and fold change threshold.
+  scale_color_manual(values = c("TRUE" = "red", "FALSE" = "grey")) +
+  labs(title = "Volcano Plot for Cluster 9 DEGs",
+       x = "Log2 Fold Change",
+       y = "-Log10 PValue",
+       color = "Significant") +
+  theme_minimal() +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "blue") + # p-value threshold line
+  geom_vline(xintercept = 1, linetype = "dashed", color = "blue") +
+  geom_vline(xintercept = -1, linetype = "dashed", color = "blue")+
+  geom_text(aes(label = label_genes), vjust = 1.5, hjust = 0.5, size = 3, check_overlap = TRUE)# Adding gene names
+
+
+# Display the plot
+print(volcano_plot)
+
+#Source: https://biostatsquid.com/volcano-plots-r-tutorial/
+````
+
+Diagnostic plots to check for potential problems in the analysis
+
+Model the mean-variance trend 
+````{r}
+
+#Diagnostic plots
+
+cluster9_plot <- metadata(cur.results9)$y
+plotBCV(cluster9_plot,main = ' Gene BCV as a function of the Cluster 9 average abundance Analysis')
+
+
+````
+
+
+
+check for labels that were skipped as a result of no replicates or contrasts
+````{r}
+metadata(de.results)$failed 
+# No skipped labels
+````
+
+Top 10 selected Marker genes associated with inflammation and Head and Neck Cancer in Myeloid cells (particularly monocytes)
+````{r}
+HNSCC_markers <-cbind(rownames(top_genes4),rownames(top_gene5),rownames(top_genes9))
+colnames(HNSCC_markers) <- c('cluster4','cluster5','cluster9')
+data.frame(HNSCC_markers)
+
+
+````
+
+**11.2 DE Between HNSCC and Healthy Donor PBMC cells**
+
+DE between HNSCC and HD cells for PBMC cells
+
+Subset for PBMC cells 
+
+`````{r}
+#sce.pbmc <- sce.myeloid[,colData(sce.myeloid)$celltype=='TRUE']
+sce.pbmc <- sce.myeloid[, grepl("PBMC", colData(sce.myeloid)$Sample)]
+sce.pbmc
+
+````
+
+
+**Creating pseudo-bulk samples**
+
+````{r}
+
+# Create Using 'label' and 'sample' as our two factors; each column of the output
+# corresponds to one unique combination of these two factors.
+sce.pbmc.summed <- aggregateAcrossCells(sce.pbmc, 
+    id=colData(sce.pbmc)[,c("label", "Sample")])
+sce.pbmc.summed
+
+
+# Removing all pseudo-bulk samples with 'insufficient' cells.
+sce..pbmc.summed <- sce.pbmc.summed[,sce.pbmc.summed$ncells >= 10]
+
+
+````
+PBMC DE analysis for each of the labels**
+
+Identify HNCC induced DE in each cell type (Monocytes)
+````{r}
+pbmc.de.results <- pseudoBulkDGE(sce.pbmc.summed, 
+    label=sce.pbmc.summed$label,
+    design=~condition,
+    coef="conditionHNSCC",
+    condition=sce.pbmc.summed$condition
+)
+
+pbmc.de.results
+
+````
+Cluster 4 PBMC Results
+
+````{r}
+
+pbmc.cur.results4 <- pbmc.de.results[['4']]
+
+
+# Filter out rows with NA values in the relevant columns
+non_na_genes_pbmc4 <- pbmc.cur.results4[!is.na(pbmc.cur.results4$PValue) & 
+                             !is.na(pbmc.cur.results4$FDR) & 
+                             !is.na(pbmc.cur.results4$logFC), ]
+
+# Filter genes based on the given criteria
+filtered_genes_pbmc4 <- non_na_genes_pbmc4[(non_na_genes_pbmc4$PValue < 0.05) & 
+                               (non_na_genes_pbmc4$FDR < 0.35) & 
+                               (abs(non_na_genes_pbmc4$logFC) > 1), ]
+
+# Order the filtered genes by FDR and select the top 10 Genes
+pbmc_top_genes4 <- head(filtered_genes_pbmc4[order(filtered_genes_pbmc4$FDR), ], 10)
+data.frame(pbmc_top_genes4)
+
+
+````
+
+Diagnostic plots to check for potential problems in the analysis
+
+Model the mean-variance trend 
+````{r}
+
+#Diagnostic plots
+
+pbmc_cluster4_plot <- metadata(pbmc.cur.results4)$y
+plotBCV(pbmc_cluster4_plot,main = ' Gene BCV as a function of the PBMC Cells Cluster 4 average abundance Analysis')
+
+````
+
+Cluster 5 PBMC Results
+
+````{r}
+pbmc.cur.results5 <- pbmc.de.results[['5']]
+
+
+# Filter out rows with NA values in the relevant columns
+non_na_genes_pbmc5 <- pbmc.cur.results5[!is.na(pbmc.cur.results5$PValue) & 
+                             !is.na(pbmc.cur.results5$FDR) & 
+                             !is.na(pbmc.cur.results5$logFC), ]
+
+# Filter genes based on the given criteria
+filtered_genes_pbmc5 <- non_na_genes_pbmc5[(non_na_genes_pbmc5$PValue < 0.05) & 
+                               (non_na_genes_pbmc5$FDR < 0.9) & 
+                               (abs(non_na_genes_pbmc5$logFC) > 1), ]
+
+# Order the filtered genes by FDR and select the top 10 Genes
+pbmc_top_genes5 <- head(filtered_genes_pbmc5[order(filtered_genes_pbmc5$FDR), ], 10)
+data.frame(pbmc_top_genes5)
+
+
+````
+
+Diagnostic plots to check for potential problems in the analysis
+
+Model the mean-variance trend 
+````{r}
+
+#Diagnostic plots
+
+pbmc_cluster5_plot <- metadata(pbmc.cur.results5)$y
+plotBCV(pbmc_cluster5_plot,main = ' Gene BCV as a function of Cluster 5 average abundance Analysis in PBMCs')
+
+````
+
+
+Cluster 9 PBMC Results
+
+````{r}
+pbmc.cur.results9 <- pbmc.de.results[['9']]
+
+
+# Filter out rows with NA values in the relevant columns
+non_na_genes_pbmc9 <- pbmc.cur.results9[!is.na(pbmc.cur.results9$PValue) & 
+                             !is.na(pbmc.cur.results9$FDR) & 
+                             !is.na(pbmc.cur.results9$logFC), ]
+
+# Filter genes based on the given criteria
+filtered_genes_pbmc9 <- non_na_genes_pbmc9[(non_na_genes_pbmc9$PValue < 0.05) & 
+                               (non_na_genes_pbmc9$FDR < 0.6) & 
+                               (abs(non_na_genes_pbmc9$logFC) > 1), ]
+
+# Order the filtered genes by FDR and select the top 10 Genes
+pbmc_top_genes9 <- head(filtered_genes_pbmc9[order(filtered_genes_pbmc9$FDR), ], 10)
+data.frame(pbmc_top_genes9)
+
+
+````
+
+Diagnostic plot
+````{r}
+#Diagnostic plots
+
+pbmc_cluster9_plot <- metadata(pbmc.cur.results9)$y
+plotBCV(pbmc_cluster9_plot,main = ' Gene BCV as a function of Cluster 9 average abundance Analysis in PBMCs')
+
+
+````
+
+
+
+
+
+
+
+
+
