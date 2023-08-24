@@ -7,7 +7,6 @@
 - [Usage](#usage)
 - [Data Input](#data-input)
 - [Workflow](#workflow)
-- [Contributing](#contributing)
 - [License](#license)
 - [Acknowledgements](#acknowledgements)
 - [Contact](#contact)
@@ -111,13 +110,6 @@ The pipeline consists of the following steps:
 9. Marker Gene Detection
 10. Cell Type Annotation
 11. Differential Expression Analysis between Conditions
-
----
-
-
-## Contributing
-
-Contributions are welcome! Please read the [contributing guidelines](CONTRIBUTING.md) to get started.
 
 ---
 
